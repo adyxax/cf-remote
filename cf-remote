@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -eu
+
+FORCE=
+BRANCH=master
+REMOTE_LOGIN=root
+REMOTE_HOST=localhost
+REMOTE_PORT=22
+TUNNEL_PORT=2269
+
+function run_ssh {
+    local CMD=$1
+    local RETURN=${2:-}
+    coproc ssh -o ForwardAgent=yes \
+               -R 127.0.0.1:${TUNNEL_PORT}:127.0.0.1:22 \
+               -p ${REMOTE_PORT} \
+               ${REMOTE_LOGIN}@${REMOTE_HOST} \
+               ${CMD} 2>&1
+    exec 3>&${COPROC[0]}
+    wait $COPROC_PID
+    local code=$?
+    [[ -n $RETURN ]] && eval $RETURN="'$(cat <&3)'"
+    return $code
+}
+
+function run_ssh_interactive {
+    local CMD=$1
+    local code=0
+    ssh -o ForwardAgent=yes \
+        -R 127.0.0.1:${TUNNEL_PORT}:127.0.0.1:22 \
+        -p ${REMOTE_PORT} \
+        ${REMOTE_LOGIN}@${REMOTE_HOST} \
+        ${CMD} || code=$?
+    return $code
+}
+
+function usage {
+    echo "Usage: $0 [OPTIONS] COMMAND [ARGS]
+COMMANDS :
+    init : init the remote host testing environment
+    exec : update remote host and run cf-agent -K [ARGS]
+    clean : cleans the remote host testing environment
+Options :
+    -b <branch> : the git branch you are testing (default master)
+    -l <remote_login> : the login to ssh with (default root)
+    -h <remote_host> : the host to test your policies onto (default localhost)
+    -p <remote_port> : the port to ssh to (default 22)
+    -t <tunnel_port> : the port with which to establish the reverse tunnel to your machine
+    -f : override remote lock" >&2
+    exit 1
+}
+
+function lock {
+    run_ssh 'mkdir /srv/cfengine-lock' || {
+        run_ssh "cat /srv/cfengine-lock/lock" owner
+        if [ "${owner}" != "${USER}" -a -z "${FORCE}" ]; then
+            echo ${REMOTE_HOST} is locked by ${USER}, use -f to override.
+        fi
+    }
+    run_ssh "echo $USER > /srv/cfengine-lock/lock"
+}
+
+function unlock {
+    run_ssh 'rm -rf /srv/cfengine-lock'
+}
+
+while getopts ":b:l:h:p:t:f" o; do
+    case "${o}" in
+        b) BRANCH=${OPTARG} ;;
+        l) REMOTE_LOGIN=${OPTARG} ;;
+        h) REMOTE_HOST=${OPTARG} ;;
+        p) REMOTE_PORT=${OPTARG} ;;
+        t) TUNNEL_PORT=${OPTARG} ;;
+        f) FORCE=1 ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND-1))
+
+case "${1:-}" in
+    init)
+        lock
+        run_ssh 'test -d /srv/cfengine' && {
+            echo "/srv/cfengine already exists on ${REMOTE_HOST}"
+            exit 1
+        }
+        run_ssh "git clone -b ${BRANCH} ssh://localhost:${TUNNEL_PORT}/home/${USER}/cfengine /srv/cfengine"
+        run_ssh "cp /srv/cfengine/masterfiles/{failsafe.cf,update.cf} /var/cfengine/inputs"
+        ;;
+    exec)
+        lock
+        run_ssh_interactive "cd /srv/cfengine &&
+                             git remote update &&
+                             git reset --hard origin/${BRANCH} &&
+                             cd /srv/cfengine/masterfiles &&
+                             cf-agent -D policy_servers -Kb update -f failsafe.cf"
+        shift
+        run_ssh_interactive "cf-agent -D policy_servers -K $*"
+        ;;
+    clean)
+        lock
+        run_ssh 'test -d /srv/cfengine' && {
+            run_ssh "rm -rf /srv/cfengine"
+        }
+        unlock
+        ;;
+    *) usage ;;
+esac
+
