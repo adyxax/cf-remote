@@ -8,6 +8,28 @@ REMOTE_HOST=localhost
 REMOTE_PORT=22
 TUNNEL_PORT=2269
 
+function usage {
+    echo "Usage: $0 [OPTIONS] COMMAND [ARGS]
+COMMANDS :
+    init : init the remote host testing environment
+    exec : update remote host and run cf-agent -K [ARGS]
+    clean : cleans the remote host testing environment
+Options :
+    -b <branch> : the git branch you are testing (default master)
+    -l <remote_login> : the login to ssh with (default root)
+    -h <remote_host> : the host to test your policies onto (default localhost)
+    -p <remote_port> : the port to ssh to (default 22)
+    -t <tunnel_port> : the port with which to establish the reverse tunnel to your machine
+    -f : override remote lock" >&2
+    exit 1
+}
+
+function cleanup {
+    echo "Unknown error, rerun with bash -x for further information" }
+}
+
+trap cleanup ERR
+
 function run_ssh {
     local CMD=$1
     local RETURN=${2:-}
@@ -32,22 +54,6 @@ function run_ssh_interactive {
         ${REMOTE_LOGIN}@${REMOTE_HOST} \
         ${CMD} || code=$?
     return $code
-}
-
-function usage {
-    echo "Usage: $0 [OPTIONS] COMMAND [ARGS]
-COMMANDS :
-    init : init the remote host testing environment
-    exec : update remote host and run cf-agent -K [ARGS]
-    clean : cleans the remote host testing environment
-Options :
-    -b <branch> : the git branch you are testing (default master)
-    -l <remote_login> : the login to ssh with (default root)
-    -h <remote_host> : the host to test your policies onto (default localhost)
-    -p <remote_port> : the port to ssh to (default 22)
-    -t <tunnel_port> : the port with which to establish the reverse tunnel to your machine
-    -f : override remote lock" >&2
-    exit 1
 }
 
 function lock {
@@ -89,6 +95,10 @@ case "${1:-}" in
         ;;
     exec)
         lock
+        run_ssh 'test -d /srv/cfengine' || {
+            echo "/srv/cfengine doesn't exist on ${REMOTE_HOST}, did you forget to run init?"
+            exit 1
+        }
         run_ssh_interactive "cd /srv/cfengine &&
                              git remote update &&
                              git reset --hard origin/${BRANCH} &&
